@@ -33,12 +33,7 @@ class BuildEnvironmentBase:
         # Save the reference to query it from inside the test
         self.requests_mock = requests_mock
 
-        self.project = fixture.get(
-            Project,
-            slug="project",
-            enable_epub_build=True,
-            enable_pdf_build=True,
-        )
+        self.project = self._get_project()
         self.version = self.project.versions.get(slug="latest")
         self.build = fixture.get(
             Build,
@@ -59,6 +54,14 @@ class BuildEnvironmentBase:
         # tearDown
         self.mocker.stop()
 
+    def _get_project(self):
+        return fixture.get(
+            Project,
+            slug="project",
+            enable_epub_build=True,
+            enable_pdf_build=True,
+        )
+
     def _trigger_update_docs_task(self):
         # NOTE: is it possible to replace calling this directly by `trigger_build` instead? :)
         return update_docs_task.delay(
@@ -76,6 +79,86 @@ class BuildEnvironmentBase:
         config.validate()
         return config
 
+
+class TestCustomConfigFile(BuildEnvironmentBase):
+
+    # Relative path to where a custom config file is assumed to exist in repo
+    config_file_name = "unique.yaml"
+
+    def _get_project(self):
+        return fixture.get(
+            Project,
+            slug="project",
+            enable_epub_build=False,
+            enable_pdf_build=False,
+            readthedocs_yaml_path=self.config_file_name,
+        )
+
+    def _config_file(self, config):
+        config = BuildConfigV2(
+            {},
+            config,
+            source_file=self.config_file_name,
+        )
+        config.validate()
+        return config
+
+    @mock.patch("readthedocs.doc_builder.director.load_yaml_config")
+    @mock.patch("readthedocs.doc_builder.director.BuildDirector.build_docs_class")
+    def test_config_is_stored(self, build_docs_class, load_yaml_config):
+        """Test that a custom config file is stored"""
+
+        # We add the PDF format to this config so we can check that the
+        # config file is in use
+        config = self._config_file(
+            {
+                "version": 2,
+                "formats": ["pdf"],
+                "sphinx": {
+                    "configuration": "docs/conf.py",
+                },
+            }
+        )
+        load_yaml_config.return_value = config
+        build_docs_class.return_value = True  # success
+
+        assert not BuildData.objects.all().exists()
+
+        self._trigger_update_docs_task()
+
+        # Assert that the director tries to load the custom config file
+        load_yaml_config.assert_called_once_with(
+            version=mock.ANY, readthedocs_yaml_path=self.config_file_name
+        )
+
+        # Assert that we are building a PDF, since that is what our custom config file says
+        build_docs_class.assert_called_with("sphinx_pdf")
+
+    @mock.patch("readthedocs.core.utils.filesystem._assert_path_is_inside_docroot")
+    @mock.patch("readthedocs.doc_builder.director.BuildDirector.build_docs_class")
+    def test_config_file_is_loaded(
+        self, build_docs_class, _assert_path_is_inside_docroot
+    ):
+        """Test that a custom config file is loaded
+
+        The readthedocs_yaml_path field on Project should be loading the file that we add
+        to the repo."""
+
+        # While testing, we are unsure if temporary test files exist in the docroot
+        _assert_path_is_inside_docroot.return_value = True
+
+        self.mocker.add_file_in_repo_checkout(
+            self.config_file_name,
+            "version: 2\n"
+            "formats: [pdf]\n"
+            "sphinx:\n"
+            "    configuration: docs/conf.py",
+        )
+
+        self._trigger_update_docs_task()
+
+        # Assert that we are building a PDF, since that is what our custom config file says
+        build_docs_class.assert_called_with("sphinx_pdf")
 
 class TestBuildTask(BuildEnvironmentBase):
     @pytest.mark.parametrize(
@@ -120,7 +203,7 @@ class TestBuildTask(BuildEnvironmentBase):
                 "-D",
                 "language=en",
                 ".",
-                "../_readthedocs/html",
+                "$READTHEDOCS_OUTPUT/html",
                 cwd=mock.ANY,
                 bin_path=mock.ANY,
             )
@@ -141,7 +224,7 @@ class TestBuildTask(BuildEnvironmentBase):
                     "-D",
                     "language=en",
                     ".",
-                    "../_readthedocs/html",
+                    "$READTHEDOCS_OUTPUT/html",
                     cwd=mock.ANY,
                     bin_path=mock.ANY,
                 )
@@ -216,6 +299,7 @@ class TestBuildTask(BuildEnvironmentBase):
         assert self.requests_mock.request_history[7]._request.method == "PATCH"
         assert self.requests_mock.request_history[7].path == "/api/v2/version/1/"
         assert self.requests_mock.request_history[7].json() == {
+            "build_data": None,
             "built": True,
             "documentation_type": "mkdocs",
             "has_pdf": True,
@@ -275,6 +359,12 @@ class TestBuildTask(BuildEnvironmentBase):
             "READTHEDOCS_VERSION_NAME": self.version.verbose_name,
             "READTHEDOCS_PROJECT": self.project.slug,
             "READTHEDOCS_LANGUAGE": self.project.language,
+            "READTHEDOCS_OUTPUT": os.path.join(
+                self.project.checkout_path(self.version.slug), "_readthedocs/"
+            ),
+            "READTHEDOCS_GIT_CLONE_URL": self.project.repo,
+            "READTHEDOCS_GIT_IDENTIFIER": self.version.identifier,
+            "READTHEDOCS_GIT_COMMIT_HASH": self.build.commit,
         }
 
         self._trigger_update_docs_task()
@@ -297,6 +387,11 @@ class TestBuildTask(BuildEnvironmentBase):
             # Local and Circle are different values.
             # We only check it's present, but not its value.
             READTHEDOCS_VIRTUALENV_PATH=mock.ANY,
+            READTHEDOCS_CANONICAL_URL=self.project.get_docs_url(
+                lang_slug=self.project.language,
+                version_slug=self.version.slug,
+                external=external,
+            ),
         )
         if not external:
             expected_build_env_vars["PRIVATE_TOKEN"] = "a1b2c3"
@@ -378,7 +473,7 @@ class TestBuildTask(BuildEnvironmentBase):
 
         # TODO: assert the verb and the path for each API call as well
 
-        # Update build state: clonning
+        # Update build state: cloning
         assert self.requests_mock.request_history[3].json() == {
             "id": 1,
             "state": "cloning",
@@ -393,6 +488,7 @@ class TestBuildTask(BuildEnvironmentBase):
             "state": "installing",
             "commit": "a1b2c3",
             "builder": mock.ANY,
+            "readthedocs_yaml_path": None,
             "error": "",
             # We update the `config` field at the same time we send the
             # `installing` state, to reduce one API call
@@ -437,6 +533,7 @@ class TestBuildTask(BuildEnvironmentBase):
             "id": 1,
             "state": "building",
             "commit": "a1b2c3",
+            "readthedocs_yaml_path": None,
             "config": mock.ANY,
             "builder": mock.ANY,
             "error": "",
@@ -446,6 +543,7 @@ class TestBuildTask(BuildEnvironmentBase):
             "id": 1,
             "state": "uploading",
             "commit": "a1b2c3",
+            "readthedocs_yaml_path": None,
             "config": mock.ANY,
             "builder": mock.ANY,
             "error": "",
@@ -454,6 +552,7 @@ class TestBuildTask(BuildEnvironmentBase):
         assert self.requests_mock.request_history[7]._request.method == "PATCH"
         assert self.requests_mock.request_history[7].path == "/api/v2/version/1/"
         assert self.requests_mock.request_history[7].json() == {
+            "build_data": None,
             "built": True,
             "documentation_type": "sphinx",
             "has_pdf": True,
@@ -469,6 +568,7 @@ class TestBuildTask(BuildEnvironmentBase):
             "id": 1,
             "state": "finished",
             "commit": "a1b2c3",
+            "readthedocs_yaml_path": None,
             "config": mock.ANY,
             "builder": mock.ANY,
             "length": mock.ANY,
@@ -608,7 +708,7 @@ class TestBuildTask(BuildEnvironmentBase):
                     "--upgrade",
                     "--no-cache-dir",
                     "pip",
-                    "setuptools<58.3.0",
+                    "setuptools",
                     bin_path=mock.ANY,
                     cwd=mock.ANY,
                 ),
@@ -653,7 +753,7 @@ class TestBuildTask(BuildEnvironmentBase):
                     "-D",
                     "language=en",
                     ".",
-                    "../_readthedocs/html",
+                    "$READTHEDOCS_OUTPUT/html",
                     cwd=mock.ANY,
                     bin_path=mock.ANY,
                 ),
@@ -670,7 +770,7 @@ class TestBuildTask(BuildEnvironmentBase):
                     "-D",
                     "language=en",
                     ".",
-                    "../_readthedocs/htmlzip",
+                    "$READTHEDOCS_OUTPUT/htmlzip",
                     cwd=mock.ANY,
                     bin_path=mock.ANY,
                 ),
@@ -715,7 +815,7 @@ class TestBuildTask(BuildEnvironmentBase):
                     "-D",
                     "language=en",
                     ".",
-                    "../_readthedocs/pdf",
+                    "$READTHEDOCS_OUTPUT/pdf",
                     cwd=mock.ANY,
                     bin_path=mock.ANY,
                 ),
@@ -735,7 +835,7 @@ class TestBuildTask(BuildEnvironmentBase):
                     "-D",
                     "language=en",
                     ".",
-                    "../_readthedocs/epub",
+                    "$READTHEDOCS_OUTPUT/epub",
                     cwd=mock.ANY,
                     bin_path=mock.ANY,
                 ),
@@ -747,12 +847,16 @@ class TestBuildTask(BuildEnvironmentBase):
                     record=False,
                 ),
                 mock.call(
-                    "rm", "--recursive", "_readthedocs/epub", cwd=mock.ANY, record=False
+                    "rm",
+                    "--recursive",
+                    "$READTHEDOCS_OUTPUT/epub",
+                    cwd=mock.ANY,
+                    record=False,
                 ),
                 mock.call(
                     "mkdir",
                     "--parents",
-                    "_readthedocs/epub",
+                    "$READTHEDOCS_OUTPUT/epub",
                     cwd=mock.ANY,
                     record=False,
                 ),
@@ -762,6 +866,13 @@ class TestBuildTask(BuildEnvironmentBase):
                     mock.ANY,
                     cwd=mock.ANY,
                     record=False,
+                ),
+                mock.call(
+                    "test",
+                    "-x",
+                    "_build/html",
+                    record=False,
+                    cwd=mock.ANY,
                 ),
                 # FIXME: I think we are hitting this issue here:
                 # https://github.com/pytest-dev/pytest-mock/issues/234
@@ -870,7 +981,7 @@ class TestBuildTask(BuildEnvironmentBase):
                     "install",
                     "-U",
                     "virtualenv",
-                    "setuptools<58.3.0",
+                    "setuptools",
                 ),
                 mock.call("asdf", "install", "nodejs", nodejs_version),
                 mock.call("asdf", "global", "nodejs", nodejs_version),
@@ -909,10 +1020,11 @@ class TestBuildTask(BuildEnvironmentBase):
 
         self.mocker.mocks["environment.run"].assert_has_calls(
             [
-                mock.call(
-                    "git", "fetch", "--unshallow", escape_command=False, cwd=mock.ANY
-                ),
-                mock.call("echo", "`date`", escape_command=False, cwd=mock.ANY),
+                # NOTE: when running commands from `build.jobs` or
+                # `build.commands` they are not split to allow multi-line
+                # scripts
+                mock.call("git fetch --unshallow", escape_command=False, cwd=mock.ANY),
+                mock.call("echo `date`", escape_command=False, cwd=mock.ANY),
             ],
             any_order=True,
         )
@@ -1003,7 +1115,7 @@ class TestBuildTask(BuildEnvironmentBase):
                     },
                     "commands": [
                         "pip install pelican[markdown]",
-                        "pelican --settings docs/pelicanconf.py --output _readthedocs/html/ docs/",
+                        "pelican --settings docs/pelicanconf.py --output $READTHEDOCS_OUTPUT/html/ docs/",
                     ],
                 },
             },
@@ -1026,12 +1138,13 @@ class TestBuildTask(BuildEnvironmentBase):
                     "install",
                     "-U",
                     "virtualenv",
-                    "setuptools<58.3.0",
+                    "setuptools",
                 ),
+                # NOTE: when running commands from `build.jobs` or
+                # `build.commands` they are not split to allow multi-line
+                # scripts
                 mock.call(
-                    "pip",
-                    "install",
-                    "pelican[markdown]",
+                    "pip install pelican[markdown]",
                     escape_command=False,
                     cwd=mock.ANY,
                 ),
@@ -1044,12 +1157,7 @@ class TestBuildTask(BuildEnvironmentBase):
                     cwd=mock.ANY,
                 ),
                 mock.call(
-                    "pelican",
-                    "--settings",
-                    "docs/pelicanconf.py",
-                    "--output",
-                    "_readthedocs/html/",
-                    "docs/",
+                    "pelican --settings docs/pelicanconf.py --output $READTHEDOCS_OUTPUT/html/ docs/",
                     escape_command=False,
                     cwd=mock.ANY,
                 ),
@@ -1231,7 +1339,7 @@ class TestBuildTask(BuildEnvironmentBase):
                     "-D",
                     "language=en",
                     ".",
-                    "../_readthedocs/html",
+                    "$READTHEDOCS_OUTPUT/html",
                     cwd=mock.ANY,
                     bin_path=mock.ANY,
                 ),
@@ -1261,7 +1369,7 @@ class TestBuildTask(BuildEnvironmentBase):
                     "build",
                     "--clean",
                     "--site-dir",
-                    "../_readthedocs/html",
+                    "$READTHEDOCS_OUTPUT/html",
                     "--config-file",
                     "docs/mkdocs.yaml",
                     "--strict",  # fail on warning flag
@@ -1610,7 +1718,7 @@ class TestBuildTask(BuildEnvironmentBase):
                     "-D",
                     "language=en",
                     ".",
-                    "../_readthedocs/html",
+                    "$READTHEDOCS_OUTPUT/html",
                     cwd=mock.ANY,
                     bin_path=mock.ANY,
                 ),

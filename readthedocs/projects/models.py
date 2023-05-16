@@ -31,6 +31,7 @@ from readthedocs.constants import pattern_opts
 from readthedocs.core.history import ExtraHistoricalRecords
 from readthedocs.core.resolver import resolve, resolve_domain
 from readthedocs.core.utils import slugify
+from readthedocs.core.utils.url import unsafe_join_url_path
 from readthedocs.domains.querysets import DomainQueryset
 from readthedocs.projects import constants
 from readthedocs.projects.exceptions import ProjectConfigurationError
@@ -43,6 +44,7 @@ from readthedocs.projects.querysets import (
 )
 from readthedocs.projects.templatetags.projects_tags import sort_version_aware
 from readthedocs.projects.validators import (
+    validate_build_config_file,
     validate_domain_name,
     validate_no_ip,
     validate_repository_url,
@@ -143,6 +145,9 @@ class Project(models.Model):
         help_text=_('Hosted documentation repository URL'),
         db_index=True,
     )
+
+    # NOTE: this field is going to be completely removed soon.
+    # We only accept Git for new repositories
     repo_type = models.CharField(
         _('Repository type'),
         max_length=10,
@@ -323,14 +328,14 @@ class Project(models.Model):
     # Sphinx specific build options.
     enable_epub_build = models.BooleanField(
         _('Enable EPUB build'),
-        default=True,
+        default=False,
         help_text=_(
             'Create a EPUB version of your documentation with each build.',
         ),
     )
     enable_pdf_build = models.BooleanField(
         _('Enable PDF build'),
-        default=True,
+        default=False,
         help_text=_(
             'Create a PDF version of your documentation with each build.',
         ),
@@ -349,17 +354,47 @@ class Project(models.Model):
     conf_py_file = models.CharField(
         _('Python configuration file'),
         max_length=255,
-        default='',
+        default="",
         blank=True,
         help_text=_(
-            'Path from project root to <code>conf.py</code> file '
-            '(ex. <code>docs/conf.py</code>). '
-            'Leave blank if you want us to find it for you.',
+            "Path from project root to <code>conf.py</code> file "
+            "(ex. <code>docs/conf.py</code>). "
+            "Leave blank if you want us to find it for you.",
         ),
     )
 
+    readthedocs_yaml_path = models.CharField(
+        _("Path for .readthedocs.yaml"),
+        max_length=1024,
+        default=None,
+        blank=True,
+        null=True,
+        help_text=_(
+            "<strong>Warning: experimental feature</strong>. "
+            "Custom path from repository top-level to your <code>.readthedocs.yaml</code>, "
+            "ex. <code>subpath/docs/.readthedocs.yaml</code>. "
+            "Leave blank for default value: <code>.readthedocs.yaml</code>.",
+        ),
+        validators=[validate_build_config_file],
+    )
+
     featured = models.BooleanField(_('Featured'), default=False)
-    skip = models.BooleanField(_('Skip'), default=False)
+
+    skip = models.BooleanField(_("Skip (disable) building this project"), default=False)
+
+    # null=True can be removed in a later migration
+    # be careful if adding new queries on this, .filter(delisted=False) does not work
+    # but .exclude(delisted=True) does!
+    delisted = models.BooleanField(
+        null=True,
+        default=False,
+        verbose_name=_("Delisted"),
+        help_text=_(
+            "Delisting a project removes it from Read the Docs search indexing and asks external "
+            "search engines to remove it via robots.txt"
+        ),
+    )
+
     install_project = models.BooleanField(
         _('Install Project'),
         help_text=_(
@@ -630,8 +665,8 @@ class Project(models.Model):
         if self.urlconf:
             # Add our proxied api host at the first place we have a $variable
             # This supports both subpaths & normal root hosting
-            url_prefix = self.urlconf.split('$', 1)[0]
-            return '/' + url_prefix.strip('/') + '/_'
+            path_prefix = self.custom_path_prefix
+            return unsafe_join_url_path(path_prefix, "/_")
         return '/_'
 
     @property
@@ -647,6 +682,19 @@ class Project(models.Model):
     def proxied_static_path(self):
         """Path for static files hosted on the user's doc domain."""
         return f"{self.proxied_api_host}/static/"
+
+    @property
+    def custom_path_prefix(self):
+        """
+        Get the path prefix from the custom urlconf.
+
+        Returns `None` if the project doesn't have a custom urlconf.
+        """
+        if self.urlconf:
+            # Return the value before the first defined variable,
+            # as that is a prefix and not part of our normal doc patterns.
+            return self.urlconf.split("$", 1)[0]
+        return None
 
     @property
     def regex_urlconf(self):
@@ -753,12 +801,12 @@ class Project(models.Model):
 
         return ProxitoURLConf
 
-    @property
+    @cached_property
     def is_subproject(self):
         """Return whether or not this project is a subproject."""
         return self.superprojects.exists()
 
-    @property
+    @cached_property
     def superproject(self):
         relationship = self.get_parent_relationship()
         if relationship:
@@ -825,7 +873,7 @@ class Project(models.Model):
         return os.path.join(self.checkout_path(version=version), "_readthedocs", type_)
 
     def conf_file(self, version=LATEST):
-        """Find a ``conf.py`` file in the project checkout."""
+        """Find a Sphinx ``conf.py`` file in the project checkout."""
         if self.conf_py_file:
             conf_path = os.path.join(
                 self.checkout_path(version),
@@ -951,7 +999,7 @@ class Project(models.Model):
 
     @property
     def git_provider_name(self):
-        """Get the provider name for project. e.g: GitHub, GitLab, BitBucket."""
+        """Get the provider name for project. e.g: GitHub, GitLab, Bitbucket."""
         service = self.git_service_class()
         if service:
             provider = allauth_registry.by_id(service.adapter.provider_id)
@@ -1658,7 +1706,7 @@ class Domain(TimeStampedModel):
     )
     https = models.BooleanField(
         _('Use HTTPS'),
-        default=False,
+        default=True,
         help_text=_('Always use HTTPS for this domain'),
     )
     count = models.IntegerField(
@@ -1759,13 +1807,14 @@ class HTTPHeader(TimeStampedModel, models.Model):
     """
 
     HEADERS_CHOICES = (
-        ('access_control_allow_origin', 'Access-Control-Allow-Origin'),
-        ('access_control_allow_headers', 'Access-Control-Allow-Headers'),
-        ('content_security_policy', 'Content-Security-Policy'),
-        ('feature_policy', 'Feature-Policy'),
-        ('permissions_policy', 'Permissions-Policy'),
-        ('referrer_policy', 'Referrer-Policy'),
-        ('x_frame_options', 'X-Frame-Options'),
+        ("access_control_allow_origin", "Access-Control-Allow-Origin"),
+        ("access_control_allow_headers", "Access-Control-Allow-Headers"),
+        ("content_security_policy", "Content-Security-Policy"),
+        ("feature_policy", "Feature-Policy"),
+        ("permissions_policy", "Permissions-Policy"),
+        ("referrer_policy", "Referrer-Policy"),
+        ("x_frame_options", "X-Frame-Options"),
+        ("x_content_type_options", "X-Content-Type-Options"),
     )
 
     domain = models.ForeignKey(
@@ -1823,6 +1872,8 @@ class Feature(models.Model):
     ALLOW_FORCED_REDIRECTS = "allow_forced_redirects"
     DISABLE_PAGEVIEWS = "disable_pageviews"
     DISABLE_SPHINX_DOMAINS = "disable_sphinx_domains"
+    RESOLVE_PROJECT_FROM_HEADER = "resolve_project_from_header"
+    USE_UNRESOLVER_WITH_PROXITO = "use_unresolver_with_proxito"
 
     # Versions sync related features
     SKIP_SYNC_TAGS = 'skip_sync_tags'
@@ -1844,6 +1895,7 @@ class Feature(models.Model):
     DEFAULT_TO_FUZZY_SEARCH = 'default_to_fuzzy_search'
     INDEX_FROM_HTML_FILES = 'index_from_html_files'
 
+    # Build related features
     LIST_PACKAGES_INSTALLED_ENV = "list_packages_installed_env"
     VCS_REMOTE_LISTING = "vcs_remote_listing"
     SPHINX_PARALLEL = "sphinx_parallel"
@@ -1851,173 +1903,206 @@ class Feature(models.Model):
     CANCEL_OLD_BUILDS = "cancel_old_builds"
     DONT_CREATE_INDEX = "dont_create_index"
     USE_RCLONE = "use_rclone"
+    HOSTING_INTEGRATIONS = "hosting_integrations"
 
     FEATURES = (
-        (ALLOW_DEPRECATED_WEBHOOKS, _('Allow deprecated webhook views')),
+        (ALLOW_DEPRECATED_WEBHOOKS, _("Webhook: Allow deprecated webhook views")),
         (
             DONT_OVERWRITE_SPHINX_CONTEXT,
             _(
-                'Do not overwrite context vars in conf.py with Read the Docs context',
+                "Sphinx: Do not overwrite context vars in conf.py with Read the Docs context",
             ),
         ),
         (
             SKIP_SPHINX_HTML_THEME_PATH,
             _(
-                "Do not define html_theme_path on Sphinx < 6.0",
+                "Sphinx: Do not define html_theme_path on Sphinx < 6.0",
             ),
         ),
         (
             MKDOCS_THEME_RTD,
-            _('Use Read the Docs theme for MkDocs as default theme'),
+            _("MkDocs: Use Read the Docs theme for MkDocs as default theme"),
         ),
         (
             DONT_SHALLOW_CLONE,
-            _('Do not shallow clone when cloning git repos'),
+            _("Build: Do not shallow clone when cloning git repos"),
         ),
         (
             USE_TESTING_BUILD_IMAGE,
-            _('Use Docker image labelled as `testing` to build the docs'),
+            _("Build: Use Docker image labelled as `testing` to build the docs"),
         ),
         (
             API_LARGE_DATA,
-            _('Try alternative method of posting large data'),
+            _("Build: Try alternative method of posting large data"),
         ),
         (
             CLEAN_AFTER_BUILD,
-            _('Clean all files used in the build process'),
+            _("Build: Clean all files used in the build process"),
         ),
         (
             UPDATE_CONDA_STARTUP,
-            _('Upgrade conda before creating the environment'),
+            _("Conda: Upgrade conda before creating the environment"),
         ),
         (
             CONDA_APPEND_CORE_REQUIREMENTS,
-            _('Append Read the Docs core requirements to environment.yml file'),
+            _("Conda: Append Read the Docs core requirements to environment.yml file"),
         ),
         (
             ALL_VERSIONS_IN_HTML_CONTEXT,
             _(
-                'Pass all versions (including private) into the html context '
-                'when building with Sphinx'
+                "Sphinx: Pass all versions (including private) into the html context "
+                "when building with Sphinx"
             ),
         ),
         (
             CACHED_ENVIRONMENT,
-            _('Cache the environment (virtualenv, conda, pip cache, repository) in storage'),
+            _(
+                "Build: Cache the environment (virtualenv, conda, pip cache, repository) in storage"
+            ),
         ),
         (
             LIMIT_CONCURRENT_BUILDS,
-            _('Limit the amount of concurrent builds'),
+            _("Build: Limit the amount of concurrent builds"),
         ),
         (
             CDN_ENABLED,
-            _('CDN support for a project\'s public versions when privacy levels are enabled.'),
+            _(
+                "Proxito: CDN support for a project's public versions when privacy levels "
+                "are enabled."
+            ),
         ),
         (
             DOCKER_GVISOR_RUNTIME,
-            _("Use Docker gVisor runtime to create build container."),
+            _("Build: Use Docker gVisor runtime to create build container."),
         ),
         (
             RECORD_404_PAGE_VIEWS,
-            _("Record 404s page views."),
+            _("Proxito: Record 404s page views."),
         ),
         (
             ALLOW_FORCED_REDIRECTS,
-            _("Allow forced redirects."),
+            _("Proxito: Allow forced redirects."),
         ),
         (
             DISABLE_PAGEVIEWS,
-            _("Disable all page views"),
+            _("Proxito: Disable all page views"),
         ),
         (
             DISABLE_SPHINX_DOMAINS,
-            _("Disable indexing of sphinx domains"),
+            _("Sphinx: Disable indexing of sphinx domains"),
+        ),
+        (
+            RESOLVE_PROJECT_FROM_HEADER,
+            _("Proxito: Allow usage of the X-RTD-Slug header"),
+        ),
+        (
+            USE_UNRESOLVER_WITH_PROXITO,
+            _(
+                "Proxito: Use new unresolver implementation for serving documentation files."
+            ),
         ),
 
         # Versions sync related features
         (
             SKIP_SYNC_BRANCHES,
-            _('Skip syncing branches'),
+            _("Webhook: Skip syncing branches"),
         ),
         (
             SKIP_SYNC_TAGS,
-            _('Skip syncing tags'),
+            _("Webhook: Skip syncing tags"),
         ),
         (
             SKIP_SYNC_VERSIONS,
-            _('Skip sync versions task'),
+            _("Webhook: Skip sync versions task"),
         ),
 
         # Dependencies related features
-        (PIP_ALWAYS_UPGRADE, _('Always run pip install --upgrade')),
-        (USE_NEW_PIP_RESOLVER, _('Use new pip resolver')),
+        (PIP_ALWAYS_UPGRADE, _("Build: Always run pip install --upgrade")),
+        (USE_NEW_PIP_RESOLVER, _("Build: Use new pip resolver")),
         (
             DONT_INSTALL_LATEST_PIP,
-            _('Don\'t install the latest version of pip'),
+            _("Build: Don't install the latest version of pip"),
         ),
-        (USE_SPHINX_LATEST, _('Use latest version of Sphinx')),
+        (USE_SPHINX_LATEST, _("Sphinx: Use latest version of Sphinx")),
         (
             DEFAULT_TO_MKDOCS_0_17_3,
-            _('Install mkdocs 0.17.3 by default'),
+            _("MkDOcs: Install mkdocs 0.17.3 by default"),
         ),
-        (USE_MKDOCS_LATEST, _('Use latest version of MkDocs')),
+        (USE_MKDOCS_LATEST, _("MkDocs: Use latest version of MkDocs")),
         (
             USE_SPHINX_RTD_EXT_LATEST,
-            _('Use latest version of the Read the Docs Sphinx extension'),
+            _("Sphinx: Use latest version of the Read the Docs Sphinx extension"),
         ),
 
         # Search related features.
         (
             DISABLE_SERVER_SIDE_SEARCH,
-            _('Disable server side search'),
+            _("Search: Disable server side search"),
         ),
         (
             ENABLE_MKDOCS_SERVER_SIDE_SEARCH,
-            _('Enable server side search for MkDocs projects'),
+            _("Search: Enable server side search for MkDocs projects"),
         ),
         (
             DEFAULT_TO_FUZZY_SEARCH,
-            _('Default to fuzzy search for simple search queries'),
+            _("Search: Default to fuzzy search for simple search queries"),
         ),
         (
             INDEX_FROM_HTML_FILES,
-            _('Index content directly from html files instead or relying in other sources'),
+            _(
+                "Search: Index content directly from html files instead or relying in other "
+                "sources"
+            ),
         ),
 
         (
             LIST_PACKAGES_INSTALLED_ENV,
             _(
-                'List packages installed in the environment ("pip list" or "conda list") '
+                'Build: List packages installed in the environment ("pip list" or "conda list") '
                 'on build\'s output',
             ),
         ),
         (
             VCS_REMOTE_LISTING,
-            _('Use remote listing in VCS (e.g. git ls-remote) if supported for sync versions'),
+            _(
+                "Build: Use remote listing in VCS (e.g. git ls-remote) if supported for sync "
+                "versions"
+            ),
         ),
         (
             SPHINX_PARALLEL,
-            _('Use "-j auto" when calling sphinx-build'),
+            _('Sphinx: Use "-j auto" when calling sphinx-build'),
         ),
         (
             USE_SPHINX_BUILDERS,
-            _('Use regular sphinx builders instead of custom RTD builders'),
+            _("Sphinx: Use regular sphinx builders instead of custom RTD builders"),
         ),
         (
             CANCEL_OLD_BUILDS,
             _(
-                "Cancel triggered/running builds when a new one with same project/version arrives"
+                "Build: Cancel triggered/running builds when a new one with same project/version "
+                "arrives"
             ),
         ),
         (
             DONT_CREATE_INDEX,
-            _('Do not create index.md or README.rst if the project does not have one.'),
+            _(
+                "Sphinx: Do not create index.md or README.rst if the project does not have one."
+            ),
         ),
         (
             USE_RCLONE,
-            _("Use rclone for syncing files to the media storage."),
+            _("Build: Use rclone for syncing files to the media storage."),
+        ),
+        (
+            HOSTING_INTEGRATIONS,
+            _(
+                "Proxito: Inject 'readthedocs-client.js' as <script> HTML tag in responses."
+            ),
         ),
     )
+
+    FEATURES = sorted(FEATURES, key=lambda l: l[1])
 
     projects = models.ManyToManyField(
         Project,

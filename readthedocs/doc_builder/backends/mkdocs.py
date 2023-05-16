@@ -45,6 +45,8 @@ class BaseMkdocs(BaseBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        # This is the *MkDocs* yaml file
         self.yaml_file = self.get_yaml_config()
 
         # README: historically, the default theme was ``readthedocs`` but in
@@ -296,17 +298,8 @@ class BaseMkdocs(BaseBuilder):
             'mkdocs',
             self.builder,
             "--clean",
-            # ``site_dir`` is relative to where the mkdocs.yaml file is
-            # https://www.mkdocs.org/user-guide/configuration/#site_dir
-            # Example:
-            #
-            #  when ``--config-file=docs/mkdocs.yml``,
-            # it must be ``--site-dir=../_readthedocs/html``
             "--site-dir",
-            os.path.join(
-                os.path.relpath(self.project_path, os.path.dirname(self.yaml_file)),
-                self.build_dir,
-            ),
+            os.path.join("$READTHEDOCS_OUTPUT", "html"),
             "--config-file",
             os.path.relpath(self.yaml_file, self.project_path),
         ]
