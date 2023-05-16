@@ -13,10 +13,11 @@ from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.response import Response
 
+from readthedocs.api.v2.utils import normalize_build_command
 from readthedocs.builds.constants import INTERNAL
 from readthedocs.builds.models import Build, BuildCommandResult, Version
 from readthedocs.oauth.models import RemoteOrganization, RemoteRepository
-from readthedocs.oauth.services import GitHubService, registry
+from readthedocs.oauth.services import registry
 from readthedocs.projects.models import Domain, Project
 from readthedocs.storage import build_commands_storage
 
@@ -184,20 +185,6 @@ class ProjectViewSet(DisableListEndpoint, UserSelectViewSet):
             'versions': VersionSerializer(versions, many=True).data,
         })
 
-    @decorators.action(
-        detail=True,
-        permission_classes=[permissions.IsAdminUser],
-    )
-    def token(self, request, **kwargs):
-        project = get_object_or_404(
-            Project.objects.api(request.user),
-            pk=kwargs['pk'],
-        )
-        token = GitHubService.get_token_for_project(project, force_local=True)
-        return Response({
-            'token': token,
-        })
-
     @decorators.action(detail=True)
     def canonical_url(self, request, **kwargs):
         project = get_object_or_404(
@@ -282,6 +269,15 @@ class BuildViewSet(DisableListEndpoint, UserSelectViewSet):
                 try:
                     json_resp = build_commands_storage.open(storage_path).read()
                     data['commands'] = json.loads(json_resp)
+
+                    # Normalize commands in the same way than when returning
+                    # them using the serializer
+                    for buildcommand in data["commands"]:
+                        buildcommand["command"] = normalize_build_command(
+                            buildcommand["command"],
+                            instance.project.slug,
+                            instance.version.slug,
+                        )
                 except Exception:
                     log.exception(
                         'Failed to read build data from storage.',
