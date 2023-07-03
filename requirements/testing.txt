@@ -263,7 +263,7 @@ pycparser==2.21
     # via
     #   -r requirements/pip.txt
     #   cffi
-pygments==2.14.0
+pygments==2.15.0
     # via
     #   -r requirements/pip.txt
     #   sphinx
