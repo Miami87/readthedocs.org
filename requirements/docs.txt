@@ -50,7 +50,7 @@ packaging==23.0
     # via sphinx
 pbr==5.11.1
     # via sphinxcontrib-video
-pygments==2.14.0
+pygments==2.15.0
     # via
     #   sphinx
     #   sphinx-prompt
