@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:kinetic
 
 ARG GITHUB_USER
 ARG GITHUB_TOKEN
