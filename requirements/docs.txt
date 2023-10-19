@@ -124,7 +124,7 @@ tornado==6.2
     # via livereload
 typing-extensions==4.4.0
     # via myst-parser
-urllib3==1.26.14
+urllib3==1.26.18
     # via requests
 
 # The following packages are considered to be unsafe in a requirements file:
