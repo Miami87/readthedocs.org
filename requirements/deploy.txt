@@ -98,7 +98,7 @@ dj-pagination==2.5.0
     # via -r requirements/pip.txt
 dj-stripe==2.6.3
     # via -r requirements/pip.txt
-django==3.2.17
+django==3.2.23
     # via
     #   -r requirements/pip.txt
     #   dj-stripe
@@ -261,7 +261,7 @@ pexpect==4.8.0
     # via ipython
 pickleshare==0.7.5
     # via ipython
-pillow==9.4.0
+pillow==10.0.0
     # via -r requirements/deploy.in
 platformdirs==2.6.2
     # via
