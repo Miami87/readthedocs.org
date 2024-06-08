@@ -120,7 +120,7 @@ sphinxcontrib-video @ git+https://github.com/readthedocs/sphinxcontrib-video/
     # via -r requirements/docs.in
 sphinxemoji==0.2.0
     # via -r requirements/docs.in
-tornado==6.2
+tornado==6.4.1
     # via livereload
 typing-extensions==4.4.0
     # via myst-parser
