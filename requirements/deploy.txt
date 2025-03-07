@@ -98,7 +98,7 @@ dj-pagination==2.5.0
     # via -r requirements/pip.txt
 dj-stripe==2.6.3
     # via -r requirements/pip.txt
-django==3.2.17
+django==4.2.20
     # via
     #   -r requirements/pip.txt
     #   dj-stripe
@@ -212,7 +212,7 @@ ipython==8.9.0
     # via -r requirements/deploy.in
 jedi==0.18.2
     # via ipython
-jinja2==3.1.2
+jinja2==3.1.6
     # via
     #   -r requirements/pip.txt
     #   sphinx
