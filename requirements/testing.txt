@@ -185,7 +185,7 @@ elasticsearch-dsl==7.4.0
     #   django-elasticsearch-dsl
 exceptiongroup==1.1.0
     # via pytest
-filelock==3.9.0
+filelock==3.20.3
     # via
     #   -r requirements/pip.txt
     #   virtualenv
