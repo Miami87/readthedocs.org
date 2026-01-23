@@ -188,7 +188,7 @@ elasticsearch-dsl==7.4.0
     #   django-elasticsearch-dsl
 executing==1.2.0
     # via stack-data
-filelock==3.9.0
+filelock==3.20.3
     # via
     #   -r requirements/pip.txt
     #   virtualenv
